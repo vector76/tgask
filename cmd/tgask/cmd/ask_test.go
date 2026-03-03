@@ -312,6 +312,58 @@ func TestAskMissingTokenExitsWithMessage(t *testing.T) {
 	}
 }
 
+// TestAskExitCode3OnTimeout: client timeout reached during polling → exit code 3, job ID on stdout.
+func TestAskExitCode3OnTimeout(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+	t.Setenv("TGASK_DEFAULT_TIMEOUT", "1")
+
+	var out bytes.Buffer
+	code, err := doAsk(newAskCmd(), []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 {
+		t.Fatalf("expected exit 3, got %d", code)
+	}
+	if !strings.Contains(out.String(), "test-id") {
+		t.Errorf("expected stdout to contain job ID 'test-id', got %q", out.String())
+	}
+}
+
+// TestAskNoOutputFileOnTimeout: --output file must NOT be created on exit 3.
+func TestAskNoOutputFileOnTimeout(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+	t.Setenv("TGASK_DEFAULT_TIMEOUT", "1")
+
+	outFile := t.TempDir() + "/out.txt"
+	cmd := newAskCmd()
+	cmd.Flags().Set("output", outFile)
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 {
+		t.Fatalf("expected exit 3, got %d", code)
+	}
+	if _, err := os.Stat(outFile); err == nil {
+		t.Error("expected output file to NOT exist on timeout, but it does")
+	}
+}
+
 // TestAskRetryLoop: 202 twice then 200 — client polls three times total, exits 0.
 func TestAskRetryLoop(t *testing.T) {
 	var pollCount int32

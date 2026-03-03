@@ -2,13 +2,16 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/spf13/cobra"
@@ -38,7 +41,7 @@ func runAsk(cmd *cobra.Command, args []string) error {
 }
 
 // doAsk contains the testable core logic of the ask command.
-// It returns an exit code (0 = success, 1 = error, 2 = expired) and any unexpected error.
+// It returns an exit code (0 = success, 1 = error, 2 = expired, 3 = client timeout) and any unexpected error.
 func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer) (int, error) {
 	_ = godotenv.Load()
 
@@ -87,7 +90,7 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 	}
 
 	// POST /api/v1/ask
-	body, _ := json.Marshal(map[string]interface{}{"prompt": prompt, "timeout": timeoutSecs})
+	body, _ := json.Marshal(map[string]interface{}{"prompt": prompt})
 	req, _ := http.NewRequest("POST", tgaskURL+"/api/v1/ask", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("Content-Type", "application/json")
@@ -112,13 +115,21 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 	outputFile, _ := cmd.Flags().GetString("output")
 	pollURL := fmt.Sprintf("%s/api/v1/result/%s?wait=30", tgaskURL, id)
 
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSecs)*time.Second)
+	defer cancel()
+
 	// Long-poll loop
 	for {
-		req, _ := http.NewRequest("GET", pollURL, nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", pollURL, nil)
 		req.Header.Set("Authorization", "Bearer "+token)
 
 		pollResp, err := http.DefaultClient.Do(req)
 		if err != nil {
+			if ctx.Err() != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				fmt.Fprintln(stdout, id)
+				fmt.Fprintln(os.Stderr, "error: timed out waiting for reply")
+				return 3, nil
+			}
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			return 1, nil
 		}
