@@ -16,12 +16,13 @@ import (
 )
 
 type mockBotAPI struct {
-	mu             sync.Mutex
-	sendForceCalls []int
-	deleteCalls    []int
-	sendMsgCalls   []string
-	nextMsgID      int
-	updatesCh      chan []telegram.Update
+	mu                  sync.Mutex
+	sendForceCalls      []int
+	sendForceTimestamps []time.Time
+	deleteCalls         []int
+	sendMsgCalls        []string
+	nextMsgID           int
+	updatesCh           chan []telegram.Update
 }
 
 func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, error) {
@@ -29,6 +30,7 @@ func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, erro
 	m.nextMsgID++
 	id := m.nextMsgID
 	m.sendForceCalls = append(m.sendForceCalls, id)
+	m.sendForceTimestamps = append(m.sendForceTimestamps, time.Now())
 	m.mu.Unlock()
 	return id, nil
 }
@@ -280,4 +282,85 @@ func TestSendWhileAskInFlight(t *testing.T) {
 			ReplyToMessage: &telegram.Message{MessageID: messageID},
 		},
 	}}
+}
+
+func TestSerialQueue(t *testing.T) {
+	serverURL, mock, cleanup := buildStack(t)
+	t.Cleanup(cleanup)
+
+	// Submit 3 jobs simultaneously from separate goroutines.
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp := authDo(t, "POST", serverURL+"/api/v1/ask", `{"prompt":"concurrent job","timeout":60}`)
+			resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+
+	// waitForNCalls blocks until sendForceCalls has at least n entries.
+	waitForNCalls := func(n int) {
+		t.Helper()
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			mock.mu.Lock()
+			count := len(mock.sendForceCalls)
+			mock.mu.Unlock()
+			if count >= n {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		t.Fatalf("timed out waiting for %d SendForceReplyMessage call(s)", n)
+	}
+
+	feedReply := func(updateID, replyMsgID, questionMsgID int, text string) {
+		mock.updatesCh <- []telegram.Update{{
+			UpdateID: updateID,
+			Message: &telegram.Message{
+				MessageID: replyMsgID,
+				Text:      text,
+				ReplyToMessage: &telegram.Message{MessageID: questionMsgID},
+			},
+		}}
+	}
+
+	// Wait for first job to be dispatched.
+	waitForNCalls(1)
+
+	// Record the time before feeding reply 1, then feed it.
+	beforeFeed1 := time.Now()
+	mock.mu.Lock()
+	msgID1 := mock.sendForceCalls[0]
+	mock.mu.Unlock()
+	feedReply(1, 1001, msgID1, "reply1")
+
+	// Wait for second job to be dispatched — proves first job completed before second started.
+	waitForNCalls(2)
+	mock.mu.Lock()
+	callTime2 := mock.sendForceTimestamps[1]
+	msgID2 := mock.sendForceCalls[1]
+	mock.mu.Unlock()
+	if callTime2.Before(beforeFeed1) {
+		t.Errorf("second SendForceReplyMessage (at %v) occurred before reply 1 was fed (at %v)", callTime2, beforeFeed1)
+	}
+
+	// Record the time before feeding reply 2, then feed it.
+	beforeFeed2 := time.Now()
+	feedReply(2, 1002, msgID2, "reply2")
+
+	// Wait for third job to be dispatched — proves second job completed before third started.
+	waitForNCalls(3)
+	mock.mu.Lock()
+	callTime3 := mock.sendForceTimestamps[2]
+	msgID3 := mock.sendForceCalls[2]
+	mock.mu.Unlock()
+	if callTime3.Before(beforeFeed2) {
+		t.Errorf("third SendForceReplyMessage (at %v) occurred before reply 2 was fed (at %v)", callTime3, beforeFeed2)
+	}
+
+	// Feed reply for job 3 to allow clean shutdown.
+	feedReply(3, 1003, msgID3, "reply3")
 }
