@@ -1,1 +1,4 @@
 .raymond/
+bin/
+*.env
+.env
