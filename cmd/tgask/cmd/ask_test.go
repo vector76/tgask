@@ -19,6 +19,7 @@ func newAskCmd() *cobra.Command {
 	cmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	cmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
 	cmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
+	cmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
 	return cmd
 }
 
@@ -394,5 +395,150 @@ func TestAskRetryLoop(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "final") {
 		t.Errorf("expected stdout to contain 'final', got %q", out.String())
+	}
+}
+
+// TestAskResumeSuccess: --resume <id> with server returning 200 done → exit 0, no POST made.
+func TestAskResumeSuccess(t *testing.T) {
+	srv, getBody := mockAskServer(t, doneHandler("resumed reply"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if !strings.Contains(out.String(), "resumed reply") {
+		t.Errorf("expected stdout to contain 'resumed reply', got %q", out.String())
+	}
+	if getBody() != nil {
+		t.Error("expected no POST to /api/v1/ask, but one was made")
+	}
+}
+
+// TestAskResumeExpired: --resume <id> with server returning 410 → exit 2.
+func TestAskResumeExpired(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGone)
+		json.NewEncoder(w).Encode(map[string]string{"status": "expired"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 {
+		t.Fatalf("expected exit 2, got %d", code)
+	}
+}
+
+// TestAskResumeMutualExclusivityArg: --resume with a prompt arg → exit 1.
+func TestAskResumeMutualExclusivityArg(t *testing.T) {
+	t.Setenv("TGASK_URL", "http://localhost:1")
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, []string{"some prompt"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+}
+
+// TestAskResumeMutualExclusivityFile: --resume with --file → exit 1.
+func TestAskResumeMutualExclusivityFile(t *testing.T) {
+	t.Setenv("TGASK_URL", "http://localhost:1")
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+	cmd.Flags().Set("file", "/tmp/somefile.txt")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+}
+
+// TestAskResumeTimeout: --resume with short timeout and 202s → exit 3 with job ID on stdout.
+func TestAskResumeTimeout(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+	t.Setenv("TGASK_DEFAULT_TIMEOUT", "1")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, nil, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 {
+		t.Fatalf("expected exit 3, got %d", code)
+	}
+	if !strings.Contains(out.String(), "job-123") {
+		t.Errorf("expected stdout to contain 'job-123', got %q", out.String())
+	}
+}
+
+// TestAskResumeOutputToFile: --resume with --output and server returning 200 → reply written to file.
+func TestAskResumeOutputToFile(t *testing.T) {
+	srv, _ := mockAskServer(t, doneHandler("file reply"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	outFile := t.TempDir() + "/out.txt"
+	cmd := newAskCmd()
+	cmd.Flags().Set("resume", "job-123")
+	cmd.Flags().Set("output", outFile)
+
+	var stdout bytes.Buffer
+	code, err := doAsk(cmd, nil, strings.NewReader(""), &stdout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("expected empty stdout, got %q", stdout.String())
+	}
+	data, err := os.ReadFile(outFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "file reply" {
+		t.Errorf("expected file content 'file reply', got %q", string(data))
 	}
 }

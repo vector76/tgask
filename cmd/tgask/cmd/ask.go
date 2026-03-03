@@ -27,6 +27,7 @@ func init() {
 	askCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	askCmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
 	askCmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
+	askCmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
@@ -66,51 +67,64 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 		}
 	}
 
-	// Resolve prompt: arg > --file > stdin
-	var prompt string
-	if len(args) > 0 {
-		prompt = args[0]
-	} else {
+	resumeID, _ := cmd.Flags().GetString("resume")
+
+	var id string
+	if resumeID != "" {
+		// --resume: skip prompt resolution and POST, go straight to polling
 		fileFlag, _ := cmd.Flags().GetString("file")
-		if fileFlag != "" {
-			data, err := os.ReadFile(fileFlag)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
-				return 1, nil
-			}
-			prompt = strings.TrimRight(string(data), "\n")
-		} else {
-			data, err := io.ReadAll(stdin)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "error reading stdin: %v\n", err)
-				return 1, nil
-			}
-			prompt = strings.TrimRight(string(data), "\n")
+		if len(args) > 0 || fileFlag != "" {
+			fmt.Fprintln(os.Stderr, "error: --resume and prompt are mutually exclusive")
+			return 1, nil
 		}
-	}
+		id = resumeID
+	} else {
+		// Resolve prompt: arg > --file > stdin
+		var prompt string
+		if len(args) > 0 {
+			prompt = args[0]
+		} else {
+			fileFlag, _ := cmd.Flags().GetString("file")
+			if fileFlag != "" {
+				data, err := os.ReadFile(fileFlag)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error: %v\n", err)
+					return 1, nil
+				}
+				prompt = strings.TrimRight(string(data), "\n")
+			} else {
+				data, err := io.ReadAll(stdin)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "error reading stdin: %v\n", err)
+					return 1, nil
+				}
+				prompt = strings.TrimRight(string(data), "\n")
+			}
+		}
 
-	// POST /api/v1/ask
-	body, _ := json.Marshal(map[string]interface{}{"prompt": prompt})
-	req, _ := http.NewRequest("POST", tgaskURL+"/api/v1/ask", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Content-Type", "application/json")
+		// POST /api/v1/ask
+		body, _ := json.Marshal(map[string]interface{}{"prompt": prompt})
+		req, _ := http.NewRequest("POST", tgaskURL+"/api/v1/ask", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return 1, nil
-	}
-	if resp.StatusCode != http.StatusCreated {
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			return 1, nil
+		}
+		if resp.StatusCode != http.StatusCreated {
+			resp.Body.Close()
+			fmt.Fprintf(os.Stderr, "error: server returned %d\n", resp.StatusCode)
+			return 1, nil
+		}
+		var askResp struct {
+			ID string `json:"id"`
+		}
+		json.NewDecoder(resp.Body).Decode(&askResp)
 		resp.Body.Close()
-		fmt.Fprintf(os.Stderr, "error: server returned %d\n", resp.StatusCode)
-		return 1, nil
+		id = askResp.ID
 	}
-	var askResp struct {
-		ID string `json:"id"`
-	}
-	json.NewDecoder(resp.Body).Decode(&askResp)
-	resp.Body.Close()
-	id := askResp.ID
 
 	outputFile, _ := cmd.Flags().GetString("output")
 	pollURL := fmt.Sprintf("%s/api/v1/result/%s?wait=30", tgaskURL, id)
