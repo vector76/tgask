@@ -320,6 +320,82 @@ func TestSendEmptyMessage(t *testing.T) {
 	}
 }
 
+// TestAskTimeoutOmitted: when request omits timeout, job uses server default.
+func TestAskTimeoutOmitted(t *testing.T) {
+	q := &mockQueue{}
+	s := New(Config{Token: "test-token", Version: "test-ver", DefaultJobTimeout: 600 * time.Second}, q, nil)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello"}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	if q.job == nil {
+		t.Fatal("expected job to be submitted")
+	}
+	if q.job.Timeout != 600*time.Second {
+		t.Errorf("expected timeout=600s, got %v", q.job.Timeout)
+	}
+}
+
+// TestAskTimeoutClientSmallerThanDefault: client timeout < server default → use client value.
+func TestAskTimeoutClientSmallerThanDefault(t *testing.T) {
+	q := &mockQueue{}
+	s := New(Config{Token: "test-token", Version: "test-ver", DefaultJobTimeout: 600 * time.Second}, q, nil)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello","timeout":120}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	if q.job == nil {
+		t.Fatal("expected job to be submitted")
+	}
+	if q.job.Timeout != 120*time.Second {
+		t.Errorf("expected timeout=120s, got %v", q.job.Timeout)
+	}
+}
+
+// TestAskTimeoutClientLargerThanDefault: client timeout > server default → capped to server default.
+func TestAskTimeoutClientLargerThanDefault(t *testing.T) {
+	q := &mockQueue{}
+	s := New(Config{Token: "test-token", Version: "test-ver", DefaultJobTimeout: 600 * time.Second}, q, nil)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello","timeout":9999}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	if q.job == nil {
+		t.Fatal("expected job to be submitted")
+	}
+	if q.job.Timeout != 600*time.Second {
+		t.Errorf("expected timeout=600s (capped), got %v", q.job.Timeout)
+	}
+}
+
+// TestAskTimeoutZeroConfigFallsBackTo3600: zero DefaultJobTimeout falls back to 3600s.
+func TestAskTimeoutZeroConfigFallsBackTo3600(t *testing.T) {
+	q := &mockQueue{}
+	s := New(Config{Token: "test-token", Version: "test-ver"}, q, nil)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello"}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	if q.job == nil {
+		t.Fatal("expected job to be submitted")
+	}
+	if q.job.Timeout != 3600*time.Second {
+		t.Errorf("expected timeout=3600s, got %v", q.job.Timeout)
+	}
+}
+
 // TestSendNotifierError: POST /api/v1/send when notifier errors returns 500.
 func TestSendNotifierError(t *testing.T) {
 	n := &mockNotifier{err: errors.New("telegram down")}

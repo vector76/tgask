@@ -23,8 +23,9 @@ type Notifier interface {
 }
 
 type Config struct {
-	Token   string
-	Version string
+	Token             string
+	Version           string
+	DefaultJobTimeout time.Duration
 }
 
 type Server struct {
@@ -35,6 +36,9 @@ type Server struct {
 }
 
 func New(cfg Config, queue Queuer, notifier Notifier) *Server {
+	if cfg.DefaultJobTimeout <= 0 {
+		cfg.DefaultJobTimeout = 3600 * time.Second
+	}
 	s := &Server{cfg: cfg, queue: queue, notifier: notifier}
 	s.router = chi.NewRouter()
 	s.setupRoutes()
@@ -96,11 +100,11 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt required"})
 		return
 	}
-	timeout := req.Timeout
-	if timeout <= 0 {
-		timeout = 300
+	jobTimeout := s.cfg.DefaultJobTimeout
+	if req.Timeout > 0 {
+		jobTimeout = min(time.Duration(req.Timeout)*time.Second, s.cfg.DefaultJobTimeout)
 	}
-	id := s.queue.Submit(req.Prompt, time.Duration(timeout)*time.Second)
+	id := s.queue.Submit(req.Prompt, jobTimeout)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 

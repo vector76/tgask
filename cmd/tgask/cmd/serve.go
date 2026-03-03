@@ -30,10 +30,11 @@ func init() {
 }
 
 type serveConfig struct {
-	botToken string
-	chatID   int64
-	token    string
-	port     string
+	botToken   string
+	chatID     int64
+	token      string
+	port       string
+	jobTimeout time.Duration
 }
 
 func resolveServeConfig(cmd *cobra.Command) (serveConfig, error) {
@@ -62,7 +63,14 @@ func resolveServeConfig(cmd *cobra.Command) (serveConfig, error) {
 		return serveConfig{}, fmt.Errorf("TGASK_CHAT_ID must be an integer: %v", err)
 	}
 
-	return serveConfig{botToken: botToken, chatID: chatID, token: token, port: port}, nil
+	jobTimeout := 3600 * time.Second
+	if s := os.Getenv("TGASK_JOB_TIMEOUT"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			jobTimeout = time.Duration(n) * time.Second
+		}
+	}
+
+	return serveConfig{botToken: botToken, chatID: chatID, token: token, port: port, jobTimeout: jobTimeout}, nil
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
@@ -86,7 +94,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	q := queue.New(dispatch, tg.HandleExpiry)
 
-	srv := server.New(server.Config{Token: cfg.token, Version: rootCmd.Version}, q, tg)
+	srv := server.New(server.Config{Token: cfg.token, Version: rootCmd.Version, DefaultJobTimeout: cfg.jobTimeout}, q, tg)
 
 	// 4. Start background workers
 	q.Start()
