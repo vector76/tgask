@@ -15,6 +15,7 @@ import (
 func newSendCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "send"}
 	cmd.Flags().StringP("file", "f", "", "Read message from file")
+	cmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	return cmd
 }
 
@@ -114,6 +115,84 @@ func TestSendExitCode1IfURLMissing(t *testing.T) {
 	t.Setenv("TGASK_TOKEN", "tok")
 
 	code, err := doSend(newSendCmd(), []string{"msg"}, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+}
+
+// mockSendServerWithAuth is like mockSendServer but also captures the Authorization header.
+func mockSendServerWithAuth(t *testing.T, statusCode int) (srv *httptest.Server, getReceivedAuth func() string) {
+	t.Helper()
+	var mu sync.Mutex
+	var receivedAuth string
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/v1/send" {
+			mu.Lock()
+			receivedAuth = r.Header.Get("Authorization")
+			mu.Unlock()
+			w.WriteHeader(statusCode)
+		} else {
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	getReceivedAuth = func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return receivedAuth
+	}
+	return srv, getReceivedAuth
+}
+
+// TestSendTokenFlagOverridesEnv: --token flag value takes precedence over TGASK_TOKEN env.
+func TestSendTokenFlagOverridesEnv(t *testing.T) {
+	srv, getAuth := mockSendServerWithAuth(t, http.StatusOK)
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "env-tok")
+
+	cmd := newSendCmd()
+	cmd.Flags().Set("token", "flag-tok")
+
+	code, err := doSend(cmd, []string{"msg"}, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if got := getAuth(); got != "Bearer flag-tok" {
+		t.Errorf("expected Authorization 'Bearer flag-tok', got %q", got)
+	}
+}
+
+// TestSendEmptyTokenFlagFallsBackToEnv: empty --token flag falls back to TGASK_TOKEN.
+func TestSendEmptyTokenFlagFallsBackToEnv(t *testing.T) {
+	srv, getAuth := mockSendServerWithAuth(t, http.StatusOK)
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "env-tok")
+
+	code, err := doSend(newSendCmd(), []string{"msg"}, strings.NewReader(""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if got := getAuth(); got != "Bearer env-tok" {
+		t.Errorf("expected Authorization 'Bearer env-tok', got %q", got)
+	}
+}
+
+// TestSendMissingTokenExitsWithCode1: no --token and no TGASK_TOKEN → exit code 1.
+func TestSendMissingTokenExitsWithCode1(t *testing.T) {
+	t.Setenv("TGASK_URL", "http://localhost:1")
+	t.Setenv("TGASK_TOKEN", "")
+
+	code, err := doSend(newSendCmd(), nil, strings.NewReader(""))
 	if err != nil {
 		t.Fatal(err)
 	}
