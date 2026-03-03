@@ -1,9 +1,9 @@
 package main
 
-import "fmt"
+import "github.com/vector76/tgask/cmd/tgask/cmd"
 
-var version = "dev"
+var version = "dev" // overwritten at compile time by -ldflags "-X main.version=..."
 
 func main() {
-	fmt.Printf("tgask version %s\n", version)
+	cmd.Execute(version)
 }
