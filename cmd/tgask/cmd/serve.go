@@ -25,31 +25,58 @@ var serveCmd = &cobra.Command{
 	RunE:  runServe,
 }
 
-func runServe(cmd *cobra.Command, args []string) error {
-	// 1. Load .env (ignore file-not-found; fail on parse errors)
+func init() {
+	serveCmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
+}
+
+type serveConfig struct {
+	botToken string
+	chatID   int64
+	token    string
+	port     string
+}
+
+func resolveServeConfig(cmd *cobra.Command) (serveConfig, error) {
 	_ = godotenv.Load()
 
-	// 2. Read and validate required env vars
 	botToken := os.Getenv("TGASK_BOT_TOKEN")
 	chatIDStr := os.Getenv("TGASK_CHAT_ID")
-	token := os.Getenv("TGASK_TOKEN")
 	port := os.Getenv("TGASK_PORT")
-	for _, pair := range [][]string{{"TGASK_BOT_TOKEN", botToken}, {"TGASK_CHAT_ID", chatIDStr}, {"TGASK_TOKEN", token}, {"TGASK_PORT", port}} {
+
+	token, _ := cmd.Flags().GetString("token")
+	if token == "" {
+		token = os.Getenv("TGASK_TOKEN")
+	}
+	if token == "" {
+		return serveConfig{}, fmt.Errorf("token not set: use --token flag or TGASK_TOKEN env var")
+	}
+
+	for _, pair := range [][]string{{"TGASK_BOT_TOKEN", botToken}, {"TGASK_CHAT_ID", chatIDStr}, {"TGASK_PORT", port}} {
 		if pair[1] == "" {
-			return fmt.Errorf("required environment variable %s is not set", pair[0])
+			return serveConfig{}, fmt.Errorf("required environment variable %s is not set", pair[0])
 		}
 	}
+
 	chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
 	if err != nil {
-		return fmt.Errorf("TGASK_CHAT_ID must be an integer: %v", err)
+		return serveConfig{}, fmt.Errorf("TGASK_CHAT_ID must be an integer: %v", err)
+	}
+
+	return serveConfig{botToken: botToken, chatID: chatID, token: token, port: port}, nil
+}
+
+func runServe(cmd *cobra.Command, args []string) error {
+	cfg, err := resolveServeConfig(cmd)
+	if err != nil {
+		return err
 	}
 
 	// 3. Build components
-	tgClient, err := newTgBotAdapter(botToken)
+	tgClient, err := newTgBotAdapter(cfg.botToken)
 	if err != nil {
 		return fmt.Errorf("telegram init: %v", err)
 	}
-	tg := telegram.New(tgClient, telegram.Config{BotToken: botToken, ChatID: chatID})
+	tg := telegram.New(tgClient, telegram.Config{BotToken: cfg.botToken, ChatID: cfg.chatID})
 
 	// DispatchFunc wraps SendQuery (which returns error) into func(*model.Job)
 	dispatch := func(job *model.Job) {
@@ -59,16 +86,16 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 	q := queue.New(dispatch, tg.HandleExpiry)
 
-	srv := server.New(server.Config{Token: token, Version: rootCmd.Version}, q, tg)
+	srv := server.New(server.Config{Token: cfg.token, Version: rootCmd.Version}, q, tg)
 
 	// 4. Start background workers
 	q.Start()
 	tg.Start()
 
 	// 5. Start HTTP server
-	httpSrv := &http.Server{Addr: ":" + port, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	httpSrv := &http.Server{Addr: ":" + cfg.port, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
 	go func() {
-		log.Printf("serve: listening on :%s", port)
+		log.Printf("serve: listening on :%s", cfg.port)
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("serve: http error: %v", err)
 		}
