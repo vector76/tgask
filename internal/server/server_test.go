@@ -4,11 +4,48 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/vector76/tgask/internal/model"
 )
+
+// mockQueue implements Queuer for testing.
+type mockQueue struct {
+	job *model.Job
+}
+
+func (m *mockQueue) Submit(prompt string, timeout time.Duration) string {
+	m.job = model.NewJob("test-id", prompt, timeout)
+	return m.job.ID
+}
+
+func (m *mockQueue) GetJob(id string) (*model.Job, bool) {
+	if m.job != nil && m.job.ID == id {
+		return m.job, true
+	}
+	return nil, false
+}
 
 func newTestServer() *Server {
 	return New(Config{Token: "secret", Version: "test-ver"}, nil, nil)
+}
+
+func newTestServerWithQueue(q Queuer) *Server {
+	return New(Config{Token: "test-token", Version: "test-ver"}, q, nil)
+}
+
+func authedRequest(method, path, body string) *http.Request {
+	var req *http.Request
+	if body != "" {
+		req = httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+	} else {
+		req = httptest.NewRequest(method, path, nil)
+	}
+	req.Header.Set("Authorization", "Bearer test-token")
+	return req
 }
 
 func TestHealthEndpoint(t *testing.T) {
@@ -79,14 +116,142 @@ func TestAskUnauthorized(t *testing.T) {
 	}
 }
 
-func TestAskCorrectToken(t *testing.T) {
-	s := newTestServer()
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/ask", nil)
-	req.Header.Set("Authorization", "Bearer secret")
+// TestAskValidPrompt: POST /api/v1/ask with valid JSON returns 201 with non-empty id.
+func TestAskValidPrompt(t *testing.T) {
+	q := &mockQueue{}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello"}`)
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 
-	if rr.Code != http.StatusNotImplemented {
-		t.Fatalf("expected 501, got %d", rr.Code)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["id"] == "" {
+		t.Error("expected non-empty id field")
+	}
+}
+
+// TestAskEmptyPrompt: POST /api/v1/ask with empty prompt returns 400.
+func TestAskEmptyPrompt(t *testing.T) {
+	q := &mockQueue{}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":""}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["error"] != "prompt required" {
+		t.Errorf("expected error=prompt required, got %q", body["error"])
+	}
+}
+
+// TestResultUnknownID: GET /api/v1/result/{id} for unknown ID returns 410.
+func TestResultUnknownID(t *testing.T) {
+	q := &mockQueue{}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodGet, "/api/v1/result/nonexistent", "")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusGone {
+		t.Fatalf("expected 410, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["status"] != "expired" {
+		t.Errorf("expected status=expired, got %q", body["status"])
+	}
+}
+
+// TestResultDoneJob: GET /api/v1/result/{id} for a done job returns 200 with reply.
+func TestResultDoneJob(t *testing.T) {
+	q := &mockQueue{}
+	q.job = &model.Job{
+		ID:     "done-id",
+		Status: model.StatusDone,
+		Reply:  "answer",
+		DoneCh: make(chan struct{}),
+	}
+	close(q.job.DoneCh)
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodGet, "/api/v1/result/done-id", "")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["status"] != "done" {
+		t.Errorf("expected status=done, got %q", body["status"])
+	}
+	if body["reply"] != "answer" {
+		t.Errorf("expected reply=answer, got %q", body["reply"])
+	}
+}
+
+// TestResultExpiredJob: GET /api/v1/result/{id} for an expired job returns 410.
+func TestResultExpiredJob(t *testing.T) {
+	q := &mockQueue{}
+	q.job = &model.Job{
+		ID:     "exp-id",
+		Status: model.StatusExpired,
+		DoneCh: make(chan struct{}),
+	}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodGet, "/api/v1/result/exp-id", "")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusGone {
+		t.Fatalf("expected 410, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["status"] != "expired" {
+		t.Errorf("expected status=expired, got %q", body["status"])
+	}
+}
+
+// TestResultLongPollTimeout: GET /api/v1/result/{id}?wait=1 for a queued job returns 202 after ~1s.
+func TestResultLongPollTimeout(t *testing.T) {
+	q := &mockQueue{}
+	q.job = &model.Job{
+		ID:     "queued-id",
+		Status: model.StatusQueued,
+		DoneCh: make(chan struct{}),
+	}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodGet, "/api/v1/result/queued-id?wait=1", "")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["status"] != "queued" {
+		t.Errorf("expected status=queued, got %q", body["status"])
 	}
 }

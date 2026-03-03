@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -82,6 +83,68 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	json.NewEncoder(w).Encode(v)
 }
 
-func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request)    { w.WriteHeader(501) }
-func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) { w.WriteHeader(501) }
-func (s *Server) handleSend(w http.ResponseWriter, r *http.Request)   { w.WriteHeader(501) }
+func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Prompt  string `json:"prompt"`
+		Timeout int    `json:"timeout"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if req.Prompt == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "prompt required"})
+		return
+	}
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = 300
+	}
+	id := s.queue.Submit(req.Prompt, time.Duration(timeout)*time.Second)
+	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
+}
+
+func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	job, ok := s.queue.GetJob(id)
+	if !ok {
+		writeJSON(w, http.StatusGone, map[string]string{"status": string(model.StatusExpired)})
+		return
+	}
+
+	// Fast path: job already in terminal state
+	if job.Status == model.StatusDone {
+		writeJSON(w, http.StatusOK, map[string]string{"status": string(model.StatusDone), "reply": job.Reply})
+		return
+	}
+	if job.Status == model.StatusExpired {
+		writeJSON(w, http.StatusGone, map[string]string{"status": string(model.StatusExpired)})
+		return
+	}
+
+	// Long-poll: wait for DoneCh or timeout
+	waitSecs := 30
+	if wStr := r.URL.Query().Get("wait"); wStr != "" {
+		if n, err := strconv.Atoi(wStr); err == nil && n > 0 {
+			waitSecs = n
+		}
+	}
+	if waitSecs > 60 {
+		waitSecs = 60
+	}
+
+	select {
+	case <-job.DoneCh:
+		if job.Status == model.StatusDone {
+			writeJSON(w, http.StatusOK, map[string]string{"status": string(model.StatusDone), "reply": job.Reply})
+		} else {
+			writeJSON(w, http.StatusGone, map[string]string{"status": string(model.StatusExpired)})
+		}
+	case <-time.After(time.Duration(waitSecs) * time.Second):
+		writeJSON(w, http.StatusAccepted, map[string]string{"status": string(job.Status)})
+	case <-r.Context().Done():
+		// client disconnected; nothing to write
+	}
+}
+
+func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) { w.WriteHeader(501) }
