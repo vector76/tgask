@@ -53,3 +53,29 @@ func (q *Queue) GetJob(id string) (*model.Job, bool) {
 	q.mu.Unlock()
 	return job, ok
 }
+
+func (q *Queue) Start() {
+	go q.worker()
+}
+
+func (q *Queue) worker() {
+	for job := range q.pending {
+		q.dispatch(job)
+
+		select {
+		case reply := <-job.ReplyCh:
+			q.mu.Lock()
+			job.Status = model.StatusDone
+			job.Reply = reply
+			close(job.DoneCh)
+			q.mu.Unlock()
+
+		case <-time.After(time.Until(job.ExpiresAt)):
+			q.mu.Lock()
+			job.Status = model.StatusExpired
+			close(job.DoneCh)
+			q.mu.Unlock()
+			q.expiry(job)
+		}
+	}
+}
