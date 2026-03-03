@@ -180,8 +180,7 @@ POST /api/v1/ask
 Content-Type: application/json
 
 {
-  "prompt": "Which migration should I apply? (a) v12 (b) v13",
-  "timeout": 300
+  "prompt": "Which migration should I apply? (a) v12 (b) v13"
 }
 ```
 
@@ -191,8 +190,11 @@ Response `201 Created`:
 { "id": "a1b2c3d4" }
 ```
 
-`timeout` (seconds) is a hint: if the human has not replied within this window
-the job is expired and waiting callers receive an error. Default: 300.
+`timeout` (seconds) is optional: if the human has not replied within this window
+the job is expired and waiting callers receive an error. When omitted, the
+server uses its configured default (`TGASK_JOB_TIMEOUT`, default 3600s). When
+provided, the effective timeout is `min(requested, server default)` — clients
+cannot exceed the server-configured maximum.
 
 ### Poll for result
 
@@ -257,7 +259,16 @@ tgask send "message"      Fire-and-forget notification
 1. POSTs to `/api/v1/ask`
 2. Long-polls `/api/v1/result/{id}` in a loop
 3. Prints the reply text to stdout (and optionally writes it to a file)
-4. Exits 0 on success, 1 on error, 2 on timeout
+4. Exit codes: 0 = success, 1 = error, 2 = expired (410), 3 = client timeout
+   (retryable — job ID is printed to stdout so the caller can resume)
+
+The `--resume` / `-r` flag resumes polling a previously submitted job by ID,
+skipping prompt resolution and the initial POST. This is useful after a client
+timeout (exit code 3) to continue waiting for the same job:
+
+```
+tgask ask --resume <job-id> -o reply.txt
+```
 
 ### File I/O flags
 
@@ -298,7 +309,8 @@ All configuration is via environment variables (`.env` file supported):
 | `TGASK_TOKEN`         | Bearer token for the HTTP API            | required             |
 | `TGASK_URL`           | Server base URL (client-side)            | `http://localhost:9100` |
 | `TGASK_PORT`          | Port the server listens on               | `9100`               |
-| `TGASK_DEFAULT_TIMEOUT` | Default query timeout (seconds)        | `300`                |
+| `TGASK_JOB_TIMEOUT`   | Server-side default job timeout (seconds) | `3600`               |
+| `TGASK_DEFAULT_TIMEOUT` | Client-side polling deadline (seconds)  | `300`                |
 
 ---
 
