@@ -23,6 +23,7 @@ var askCmd = &cobra.Command{
 func init() {
 	askCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	askCmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
+	askCmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
@@ -42,13 +43,16 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 	_ = godotenv.Load()
 
 	tgaskURL := os.Getenv("TGASK_URL")
-	token := os.Getenv("TGASK_TOKEN")
+	token, _ := cmd.Flags().GetString("token")
+	if token == "" {
+		token = os.Getenv("TGASK_TOKEN")
+	}
 	if tgaskURL == "" {
 		fmt.Fprintln(os.Stderr, "error: TGASK_URL is not set")
 		return 1, nil
 	}
 	if token == "" {
-		fmt.Fprintln(os.Stderr, "error: TGASK_TOKEN is not set")
+		fmt.Fprintln(os.Stderr, "error: token not set: use --token flag or TGASK_TOKEN env var")
 		return 1, nil
 	}
 
