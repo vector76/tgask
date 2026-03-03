@@ -147,4 +147,21 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) { w.WriteHeader(501) }
+func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Message string `json:"message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+	if req.Message == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message required"})
+		return
+	}
+	if err := s.notifier.SendNotification(req.Message); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}

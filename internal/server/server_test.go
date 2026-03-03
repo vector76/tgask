@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,6 +35,23 @@ func newTestServer() *Server {
 
 func newTestServerWithQueue(q Queuer) *Server {
 	return New(Config{Token: "test-token", Version: "test-ver"}, q, nil)
+}
+
+// mockNotifier implements Notifier for testing.
+type mockNotifier struct {
+	called  bool
+	lastMsg string
+	err     error
+}
+
+func (m *mockNotifier) SendNotification(text string) error {
+	m.called = true
+	m.lastMsg = text
+	return m.err
+}
+
+func newTestServerWithNotifier(n Notifier) *Server {
+	return New(Config{Token: "test-token", Version: "test-ver"}, nil, n)
 }
 
 func authedRequest(method, path, body string) *http.Request {
@@ -253,5 +271,71 @@ func TestResultLongPollTimeout(t *testing.T) {
 	}
 	if body["status"] != "queued" {
 		t.Errorf("expected status=queued, got %q", body["status"])
+	}
+}
+
+// TestSendValid: POST /api/v1/send with valid message returns 200 and calls notifier.
+func TestSendValid(t *testing.T) {
+	n := &mockNotifier{}
+	s := newTestServerWithNotifier(n)
+	req := authedRequest(http.MethodPost, "/api/v1/send", `{"message":"hello"}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rr.Code)
+	}
+	var body map[string]bool
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if !body["ok"] {
+		t.Error("expected ok=true")
+	}
+	if !n.called {
+		t.Error("expected notifier to be called")
+	}
+	if n.lastMsg != "hello" {
+		t.Errorf("expected lastMsg=hello, got %q", n.lastMsg)
+	}
+}
+
+// TestSendEmptyMessage: POST /api/v1/send with empty message returns 400.
+func TestSendEmptyMessage(t *testing.T) {
+	n := &mockNotifier{}
+	s := newTestServerWithNotifier(n)
+	req := authedRequest(http.MethodPost, "/api/v1/send", `{"message":""}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["error"] != "message required" {
+		t.Errorf("expected error=message required, got %q", body["error"])
+	}
+}
+
+// TestSendNotifierError: POST /api/v1/send when notifier errors returns 500.
+func TestSendNotifierError(t *testing.T) {
+	n := &mockNotifier{err: errors.New("telegram down")}
+	s := newTestServerWithNotifier(n)
+	req := authedRequest(http.MethodPost, "/api/v1/send", `{"message":"hello"}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["error"] == "" {
+		t.Error("expected non-empty error field")
 	}
 }
