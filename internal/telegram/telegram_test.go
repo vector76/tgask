@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -9,7 +10,15 @@ import (
 
 // mockBotAPI implements BotAPI for testing.
 type mockBotAPI struct {
-	updatesCh chan []Update
+	updatesCh       chan []Update
+	forceReplyMsgID int // ID returned by SendForceReplyMessage
+	sendMsgCalls    []sendMsgCall
+	deleteMsgCalls  []int
+}
+
+type sendMsgCall struct {
+	chatID int64
+	text   string
 }
 
 func (m *mockBotAPI) GetUpdates(offset, timeout int, allowed []string) ([]Update, error) {
@@ -18,14 +27,16 @@ func (m *mockBotAPI) GetUpdates(offset, timeout int, allowed []string) ([]Update
 }
 
 func (m *mockBotAPI) SendMessage(chatID int64, text string, replyMarkup interface{}) (int, error) {
+	m.sendMsgCalls = append(m.sendMsgCalls, sendMsgCall{chatID, text})
 	return 0, nil
 }
 
 func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, error) {
-	return 0, nil
+	return m.forceReplyMsgID, nil
 }
 
 func (m *mockBotAPI) DeleteMessage(chatID int64, messageID int) error {
+	m.deleteMsgCalls = append(m.deleteMsgCalls, messageID)
 	return nil
 }
 
@@ -136,6 +147,88 @@ func TestNonReplyDiscarded(t *testing.T) {
 	case got := <-job.ReplyCh:
 		t.Errorf("expected no reply, got %q", got)
 	default:
+	}
+}
+
+// TestSendQuery verifies that SendQuery sets TelegramMessageID, Status, and registers the job in inFlight.
+func TestSendQuery(t *testing.T) {
+	tg, mock := newTestTelegram()
+	mock.forceReplyMsgID = 42
+
+	job := model.NewJob("job1", "test prompt", time.Minute)
+	if err := tg.SendQuery(job); err != nil {
+		t.Fatalf("SendQuery returned error: %v", err)
+	}
+
+	if job.TelegramMessageID != 42 {
+		t.Errorf("expected TelegramMessageID=42, got %d", job.TelegramMessageID)
+	}
+	if job.Status != model.StatusAwaitingReply {
+		t.Errorf("expected StatusAwaitingReply, got %q", job.Status)
+	}
+	tg.inFlightMu.Lock()
+	got, ok := tg.inFlight[42]
+	tg.inFlightMu.Unlock()
+	if !ok {
+		t.Fatal("expected inFlight[42] to be set")
+	}
+	if got != job {
+		t.Error("expected inFlight[42] to point to job")
+	}
+}
+
+// TestSendNotification verifies that SendNotification calls SendMessage with the correct args.
+func TestSendNotification(t *testing.T) {
+	tg, mock := newTestTelegram()
+	tg.cfg.ChatID = 12345
+
+	if err := tg.SendNotification("hello"); err != nil {
+		t.Fatalf("SendNotification returned error: %v", err)
+	}
+
+	if len(mock.sendMsgCalls) != 1 {
+		t.Fatalf("expected 1 SendMessage call, got %d", len(mock.sendMsgCalls))
+	}
+	if mock.sendMsgCalls[0].chatID != 12345 {
+		t.Errorf("expected chatID=12345, got %d", mock.sendMsgCalls[0].chatID)
+	}
+	if mock.sendMsgCalls[0].text != "hello" {
+		t.Errorf("expected text %q, got %q", "hello", mock.sendMsgCalls[0].text)
+	}
+}
+
+// TestHandleExpiry verifies that HandleExpiry removes the job from inFlight, deletes the message, and sends an expiry notice.
+func TestHandleExpiry(t *testing.T) {
+	tg, mock := newTestTelegram()
+	tg.cfg.ChatID = 12345
+
+	job := model.NewJob("job1", "prompt", time.Minute)
+	const msgID = 55
+	job.TelegramMessageID = msgID
+	tg.inFlight[msgID] = job
+
+	tg.HandleExpiry(job)
+
+	tg.inFlightMu.Lock()
+	_, still := tg.inFlight[msgID]
+	tg.inFlightMu.Unlock()
+	if still {
+		t.Error("expected inFlight entry to be removed after HandleExpiry")
+	}
+
+	if len(mock.deleteMsgCalls) != 1 || mock.deleteMsgCalls[0] != msgID {
+		t.Errorf("expected DeleteMessage(%d), got %v", msgID, mock.deleteMsgCalls)
+	}
+
+	found := false
+	for _, c := range mock.sendMsgCalls {
+		if strings.Contains(c.text, "expired") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("expected SendMessage containing 'expired', calls: %v", mock.sendMsgCalls)
 	}
 }
 

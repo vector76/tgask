@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"fmt"
 	"log"
 	"sync"
 
@@ -66,6 +67,42 @@ func (t *Telegram) pollLoop() {
 			}
 			t.offset = update.UpdateID + 1
 		}
+	}
+}
+
+func (t *Telegram) SendQuery(job *model.Job) error {
+	text := fmt.Sprintf("%s\n\nReply by %s", job.Prompt, job.ExpiresAt.Format("15:04"))
+
+	messageID, err := t.api.SendForceReplyMessage(t.cfg.ChatID, text)
+	if err != nil {
+		return err
+	}
+
+	job.TelegramMessageID = messageID
+	job.Status = model.StatusAwaitingReply
+
+	t.inFlightMu.Lock()
+	t.inFlight[messageID] = job
+	t.inFlightMu.Unlock()
+
+	return nil
+}
+
+func (t *Telegram) SendNotification(text string) error {
+	_, err := t.api.SendMessage(t.cfg.ChatID, text, nil)
+	return err
+}
+
+func (t *Telegram) HandleExpiry(job *model.Job) {
+	t.inFlightMu.Lock()
+	delete(t.inFlight, job.TelegramMessageID)
+	t.inFlightMu.Unlock()
+
+	if err := t.api.DeleteMessage(t.cfg.ChatID, job.TelegramMessageID); err != nil {
+		log.Printf("telegram: DeleteMessage error: %v", err)
+	}
+	if _, err := t.api.SendMessage(t.cfg.ChatID, "This query expired — no response needed.", nil); err != nil {
+		log.Printf("telegram: SendMessage (expiry notice) error: %v", err)
 	}
 }
 
