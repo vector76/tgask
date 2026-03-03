@@ -18,6 +18,7 @@ func newAskCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "ask"}
 	cmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	cmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
+	cmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	return cmd
 }
 
@@ -218,6 +219,91 @@ func TestAskExitCode1OnServerError(t *testing.T) {
 
 	var out bytes.Buffer
 	code, err := doAsk(newAskCmd(), []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
+	}
+}
+
+// mockAskServerWithAuth is like mockAskServer but also captures the Authorization header.
+func mockAskServerWithAuth(t *testing.T, resultHandler http.HandlerFunc) (srv *httptest.Server, getReceivedAuth func() string) {
+	t.Helper()
+	var receivedAuth atomic.Value
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/api/v1/ask":
+			receivedAuth.Store(r.Header.Get("Authorization"))
+			var body map[string]interface{}
+			json.NewDecoder(r.Body).Decode(&body)
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]string{"id": "test-id"})
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/api/v1/result/"):
+			resultHandler(w, r)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	getReceivedAuth = func() string {
+		v := receivedAuth.Load()
+		if v == nil {
+			return ""
+		}
+		return v.(string)
+	}
+	return srv, getReceivedAuth
+}
+
+// TestAskTokenFlagOverridesEnv: --token flag value takes precedence over TGASK_TOKEN env.
+func TestAskTokenFlagOverridesEnv(t *testing.T) {
+	srv, getAuth := mockAskServerWithAuth(t, doneHandler("ok"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "env-tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("token", "flag-tok")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if got := getAuth(); got != "Bearer flag-tok" {
+		t.Errorf("expected Authorization 'Bearer flag-tok', got %q", got)
+	}
+}
+
+// TestAskEmptyTokenFlagFallsBackToEnv: empty --token flag falls back to TGASK_TOKEN.
+func TestAskEmptyTokenFlagFallsBackToEnv(t *testing.T) {
+	srv, getAuth := mockAskServerWithAuth(t, doneHandler("ok"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "env-tok")
+
+	var out bytes.Buffer
+	code, err := doAsk(newAskCmd(), []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	if got := getAuth(); got != "Bearer env-tok" {
+		t.Errorf("expected Authorization 'Bearer env-tok', got %q", got)
+	}
+}
+
+// TestAskMissingTokenExitsWithMessage: no --token and no TGASK_TOKEN → exit code 1.
+func TestAskMissingTokenExitsWithMessage(t *testing.T) {
+	t.Setenv("TGASK_URL", "http://localhost:1")
+	t.Setenv("TGASK_TOKEN", "")
+
+	code, err := doAsk(newAskCmd(), nil, strings.NewReader(""), &bytes.Buffer{})
 	if err != nil {
 		t.Fatal(err)
 	}
