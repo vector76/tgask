@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,7 +12,9 @@ import (
 // mockBotAPI implements BotAPI for testing.
 type mockBotAPI struct {
 	updatesCh       chan []Update
-	forceReplyMsgID int // ID returned by SendForceReplyMessage
+	errorsCh        chan error // if non-nil, errors are read from here instead of updatesCh
+	pollDoneCh      chan struct{} // if non-nil, signaled after each successful GetUpdates return
+	forceReplyMsgID int          // ID returned by SendForceReplyMessage
 	sendMsgCalls    []sendMsgCall
 	deleteMsgCalls  []int
 }
@@ -22,7 +25,22 @@ type sendMsgCall struct {
 }
 
 func (m *mockBotAPI) GetUpdates(offset, timeout int, allowed []string) ([]Update, error) {
+	if m.errorsCh != nil {
+		select {
+		case err := <-m.errorsCh:
+			if err != nil {
+				return nil, err
+			}
+		default:
+		}
+	}
 	updates := <-m.updatesCh
+	if m.pollDoneCh != nil {
+		select {
+		case m.pollDoneCh <- struct{}{}:
+		default:
+		}
+	}
 	return updates, nil
 }
 
@@ -257,4 +275,140 @@ func TestUnknownMessageIDDiscarded(t *testing.T) {
 	tg.Wait()
 
 	// No panic = success; nothing more to assert
+}
+
+func newTestTelegramWithBackoff() (*Telegram, *mockBotAPI) {
+	mock := &mockBotAPI{
+		updatesCh:  make(chan []Update, 4),
+		errorsCh:   make(chan error, 8),
+		pollDoneCh: make(chan struct{}, 1),
+	}
+	tg := New(mock, Config{})
+	tg.initialBackoff = 10 * time.Millisecond
+	tg.maxBackoff = 50 * time.Millisecond
+	return tg, mock
+}
+
+// TestBackoffOnError verifies that the poll loop backs off on errors and recovers on success.
+func TestBackoffOnError(t *testing.T) {
+	tg, mock := newTestTelegramWithBackoff()
+
+	// Queue 3 errors then a success.
+	mock.errorsCh <- fmt.Errorf("network down")
+	mock.errorsCh <- fmt.Errorf("network down")
+	mock.errorsCh <- fmt.Errorf("network down")
+	mock.updatesCh <- []Update{{UpdateID: 1, Message: &Message{MessageID: 1, Text: "ok"}}}
+
+	tg.Start()
+
+	select {
+	case <-mock.pollDoneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for poll loop to recover after errors")
+	}
+
+	tg.Stop()
+	mock.updatesCh <- []Update{}
+	tg.Wait()
+
+	if tg.offset != 2 {
+		t.Errorf("expected offset 2, got %d", tg.offset)
+	}
+}
+
+// TestBackoffCapsAtMax verifies that backoff does not exceed maxBackoff by sending
+// enough errors that the doubling would overshoot, then checking total elapsed time.
+func TestBackoffCapsAtMax(t *testing.T) {
+	tg, mock := newTestTelegramWithBackoff()
+
+	// With initialBackoff=10ms and maxBackoff=50ms, the sequence is:
+	// 10ms + 20ms + 40ms + 50ms + 50ms = 170ms (capped at 50ms after 40ms)
+	// Without cap it would be: 10 + 20 + 40 + 80 + 160 = 310ms
+	for i := 0; i < 5; i++ {
+		mock.errorsCh <- fmt.Errorf("error %d", i)
+	}
+	mock.updatesCh <- []Update{{UpdateID: 1, Message: &Message{MessageID: 1, Text: "ok"}}}
+
+	start := time.Now()
+	tg.Start()
+
+	select {
+	case <-mock.pollDoneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out")
+	}
+
+	elapsed := time.Since(start)
+	tg.Stop()
+	mock.updatesCh <- []Update{}
+	tg.Wait()
+
+	// Should take ~170ms (capped), not ~310ms (uncapped).
+	if elapsed > 250*time.Millisecond {
+		t.Errorf("backoff took %v; expected ~170ms with cap, suggesting cap is not working", elapsed)
+	}
+}
+
+// TestBackoffResetsOnSuccess verifies that a successful poll resets the backoff to zero.
+func TestBackoffResetsOnSuccess(t *testing.T) {
+	tg, mock := newTestTelegramWithBackoff()
+
+	// One error, then success.
+	mock.errorsCh <- fmt.Errorf("transient error")
+	mock.updatesCh <- []Update{{UpdateID: 10, Message: &Message{MessageID: 1, Text: "ok"}}}
+
+	tg.Start()
+
+	select {
+	case <-mock.pollDoneCh:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first successful poll")
+	}
+
+	// Queue another result. If backoff reset, this poll happens immediately.
+	mock.updatesCh <- []Update{{UpdateID: 20, Message: &Message{MessageID: 2, Text: "ok2"}}}
+
+	select {
+	case <-mock.pollDoneCh:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("second poll did not happen promptly; backoff may not have reset")
+	}
+
+	tg.Stop()
+	mock.updatesCh <- []Update{}
+	tg.Wait()
+
+	if tg.offset != 21 {
+		t.Errorf("expected offset 21, got %d", tg.offset)
+	}
+}
+
+// TestBackoffRespectsStop verifies that Stop() interrupts a backoff sleep.
+func TestBackoffRespectsStop(t *testing.T) {
+	mock := &mockBotAPI{
+		updatesCh: make(chan []Update, 1),
+		errorsCh:  make(chan error, 1),
+	}
+	tg := New(mock, Config{})
+	tg.initialBackoff = 10 * time.Second // long backoff to prove Stop() interrupts it
+
+	mock.errorsCh <- fmt.Errorf("network error")
+
+	tg.Start()
+	time.Sleep(100 * time.Millisecond) // let loop hit the error and enter backoff
+
+	tg.Stop()
+	mock.updatesCh <- []Update{} // unblock in case it gets past backoff
+
+	done := make(chan struct{})
+	go func() {
+		tg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop() did not interrupt backoff sleep in time")
+	}
 }

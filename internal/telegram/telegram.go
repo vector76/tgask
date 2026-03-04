@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/vector76/tgask/internal/model"
 )
@@ -14,21 +15,25 @@ type Config struct {
 }
 
 type Telegram struct {
-	api        BotAPI
-	cfg        Config
-	inFlight   map[int]*model.Job // keyed by TelegramMessageID
-	inFlightMu sync.Mutex         // protects inFlight
-	offset     int                // only accessed by pollLoop goroutine; no mutex needed
-	stopCh     chan struct{}
-	wg         sync.WaitGroup
+	api            BotAPI
+	cfg            Config
+	inFlight       map[int]*model.Job // keyed by TelegramMessageID
+	inFlightMu     sync.Mutex         // protects inFlight
+	offset         int                // only accessed by pollLoop goroutine; no mutex needed
+	stopCh         chan struct{}
+	wg             sync.WaitGroup
+	initialBackoff time.Duration
+	maxBackoff     time.Duration
 }
 
 func New(api BotAPI, cfg Config) *Telegram {
 	return &Telegram{
-		api:      api,
-		cfg:      cfg,
-		inFlight: make(map[int]*model.Job),
-		stopCh:   make(chan struct{}),
+		api:            api,
+		cfg:            cfg,
+		inFlight:       make(map[int]*model.Job),
+		stopCh:         make(chan struct{}),
+		initialBackoff: 1 * time.Second,
+		maxBackoff:     5 * time.Minute,
 	}
 }
 
@@ -48,6 +53,7 @@ func (t *Telegram) Wait() {
 
 func (t *Telegram) pollLoop() {
 	defer t.wg.Done()
+	backoff := time.Duration(0)
 	for {
 		select {
 		case <-t.stopCh:
@@ -55,12 +61,30 @@ func (t *Telegram) pollLoop() {
 		default:
 		}
 
+		if backoff > 0 {
+			log.Printf("telegram: backing off %v before next poll", backoff)
+			select {
+			case <-time.After(backoff):
+			case <-t.stopCh:
+				return
+			}
+		}
+
 		updates, err := t.api.GetUpdates(t.offset, 30, []string{"message"})
 		if err != nil {
 			log.Printf("telegram: GetUpdates error: %v", err)
+			if backoff == 0 {
+				backoff = t.initialBackoff
+			} else {
+				backoff *= 2
+				if backoff > t.maxBackoff {
+					backoff = t.maxBackoff
+				}
+			}
 			continue
 		}
 
+		backoff = 0
 		for _, update := range updates {
 			if update.Message != nil && update.Message.ReplyToMessage != nil {
 				t.handleReply(update.Message)
