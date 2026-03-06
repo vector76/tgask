@@ -21,6 +21,7 @@ func newAskCmd() *cobra.Command {
 	cmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	cmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
 	cmd.Flags().BoolP("plain-text", "t", false, "Send prompt as plain text (no Markdown formatting)")
+	cmd.Flags().Int("timeout", 0, "Client timeout in seconds (overrides TGASK_DEFAULT_TIMEOUT)")
 	return cmd
 }
 
@@ -606,5 +607,29 @@ func TestAskResumeOutputToFile(t *testing.T) {
 	}
 	if string(data) != "file reply" {
 		t.Errorf("expected file content 'file reply', got %q", string(data))
+	}
+}
+
+// TestAskTimeoutFlagOverridesEnv: --timeout flag takes precedence over TGASK_DEFAULT_TIMEOUT.
+func TestAskTimeoutFlagOverridesEnv(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "queued"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+	t.Setenv("TGASK_DEFAULT_TIMEOUT", "9999")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("timeout", "1")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 3 {
+		t.Fatalf("expected exit 3 (client timeout), got %d", code)
 	}
 }

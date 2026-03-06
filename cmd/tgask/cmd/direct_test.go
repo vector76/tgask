@@ -62,6 +62,7 @@ func newDirectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "direct"}
 	cmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	cmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
+	cmd.Flags().Int("timeout", 0, "Client timeout in seconds (overrides TGASK_DEFAULT_TIMEOUT)")
 	return cmd
 }
 
@@ -323,5 +324,26 @@ func TestDirectMissingChatID(t *testing.T) {
 	}
 	if code != 1 {
 		t.Fatalf("expected exit 1, got %d", code)
+	}
+}
+
+// TestDirectTimeoutFlagOverridesEnv: --timeout flag takes precedence over TGASK_DEFAULT_TIMEOUT.
+func TestDirectTimeoutFlagOverridesEnv(t *testing.T) {
+	t.Setenv("TGASK_BOT_TOKEN", "bot")
+	t.Setenv("TGASK_CHAT_ID", "123")
+	t.Setenv("TGASK_DEFAULT_TIMEOUT", "9999")
+
+	mock := newPreloadedMock()
+	// No reply fed — timeout will fire after the flag value (1s).
+
+	cmd := newDirectCmd()
+	cmd.Flags().Set("timeout", "1")
+
+	code, err := doDirect(cmd, []string{"q"}, strings.NewReader(""), &bytes.Buffer{}, mock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 2 {
+		t.Fatalf("expected exit 2 (expired), got %d", code)
 	}
 }

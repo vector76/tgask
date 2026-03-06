@@ -29,6 +29,7 @@ func init() {
 	askCmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	askCmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
 	askCmd.Flags().BoolP("plain-text", "t", false, "Send prompt as plain text (no Markdown formatting)")
+	askCmd.Flags().Int("timeout", 0, "Client timeout in seconds (overrides TGASK_DEFAULT_TIMEOUT)")
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
@@ -66,6 +67,9 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			timeoutSecs = n
 		}
+	}
+	if n, _ := cmd.Flags().GetInt("timeout"); n > 0 {
+		timeoutSecs = n
 	}
 
 	resumeID, _ := cmd.Flags().GetString("resume")

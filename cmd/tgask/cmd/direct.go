@@ -23,6 +23,7 @@ var directCmd = &cobra.Command{
 func init() {
 	directCmd.Flags().StringP("file", "f", "", "Read prompt from file")
 	directCmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
+	directCmd.Flags().Int("timeout", 0, "Client timeout in seconds (overrides TGASK_DEFAULT_TIMEOUT)")
 }
 
 func runDirect(cmd *cobra.Command, args []string) error {
@@ -66,6 +67,9 @@ func doDirect(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writ
 		if n, err := strconv.Atoi(s); err == nil && n > 0 {
 			timeoutSecs = n
 		}
+	}
+	if n, _ := cmd.Flags().GetInt("timeout"); n > 0 {
+		timeoutSecs = n
 	}
 
 	// Resolve prompt: arg > --file > stdin
