@@ -1,6 +1,7 @@
 package queue
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -11,7 +12,7 @@ import (
 
 func TestSubmitReturnsNonEmptyID(t *testing.T) {
 	q := New(nil, nil)
-	id := q.Submit("hello", time.Minute)
+	id := q.Submit("hello", time.Minute, false)
 	if id == "" {
 		t.Fatal("expected non-empty ID")
 	}
@@ -19,7 +20,7 @@ func TestSubmitReturnsNonEmptyID(t *testing.T) {
 
 func TestGetJobFindsSubmittedJob(t *testing.T) {
 	q := New(nil, nil)
-	id := q.Submit("hello", time.Minute)
+	id := q.Submit("hello", time.Minute, false)
 	job, ok := q.GetJob(id)
 	if !ok {
 		t.Fatal("expected job to be found")
@@ -42,8 +43,8 @@ func TestGetJobReturnsFalseForUnknownID(t *testing.T) {
 
 func TestSubmitReturnsDifferentIDs(t *testing.T) {
 	q := New(nil, nil)
-	id1 := q.Submit("first", time.Minute)
-	id2 := q.Submit("second", time.Minute)
+	id1 := q.Submit("first", time.Minute, false)
+	id2 := q.Submit("second", time.Minute, false)
 	if id1 == id2 {
 		t.Fatalf("expected different IDs, got %q twice", id1)
 	}
@@ -52,7 +53,7 @@ func TestSubmitReturnsDifferentIDs(t *testing.T) {
 func TestIDsAreURLSafe(t *testing.T) {
 	q := New(nil, nil)
 	for i := 0; i < 20; i++ {
-		id := q.Submit("prompt", time.Minute)
+		id := q.Submit("prompt", time.Minute, false)
 		if strings.ContainsAny(id, "+/=") {
 			t.Fatalf("ID %q contains non-URL-safe characters", id)
 		}
@@ -67,7 +68,7 @@ func TestWorkerSerialProcessing(t *testing.T) {
 	var mu sync.Mutex
 	dispatchCount := 0
 
-	dispatch := func(job *model.Job) {
+	dispatch := func(job *model.Job) error {
 		mu.Lock()
 		dispatchCount++
 		n := dispatchCount
@@ -78,13 +79,14 @@ func TestWorkerSerialProcessing(t *testing.T) {
 		} else {
 			close(secondDispatched)
 		}
+		return nil
 	}
 
 	q := New(dispatch, func(*model.Job) {})
 	q.Start()
 
-	id1 := q.Submit("first", time.Minute)
-	id2 := q.Submit("second", time.Minute)
+	id1 := q.Submit("first", time.Minute, false)
+	id2 := q.Submit("second", time.Minute, false)
 
 	// Wait for the first job to be dispatched.
 	j1 := <-firstJob
@@ -119,7 +121,7 @@ func TestWorkerSerialProcessing(t *testing.T) {
 func TestWorkerExpiry(t *testing.T) {
 	expiryCalled := make(chan *model.Job, 1)
 
-	dispatch := func(job *model.Job) {}
+	dispatch := func(job *model.Job) error { return nil }
 	expiry := func(job *model.Job) {
 		expiryCalled <- job
 	}
@@ -127,7 +129,7 @@ func TestWorkerExpiry(t *testing.T) {
 	q := New(dispatch, expiry)
 	q.Start()
 
-	id := q.Submit("expire me", 50*time.Millisecond)
+	id := q.Submit("expire me", 50*time.Millisecond, false)
 
 	select {
 	case job := <-expiryCalled:
@@ -147,17 +149,48 @@ func TestWorkerExpiry(t *testing.T) {
 	_ = id
 }
 
-func TestWorkerReplyRouting(t *testing.T) {
-	dispatched := make(chan *model.Job, 1)
-
-	dispatch := func(job *model.Job) {
-		dispatched <- job
+func TestWorkerDispatchError(t *testing.T) {
+	dispatch := func(job *model.Job) error {
+		return fmt.Errorf("telegram rejected message")
 	}
 
 	q := New(dispatch, func(*model.Job) {})
 	q.Start()
 
-	id := q.Submit("hello", time.Minute)
+	id := q.Submit("bad prompt", time.Minute, false)
+
+	job, ok := q.GetJob(id)
+	if !ok {
+		t.Fatal("job not found")
+	}
+
+	select {
+	case <-job.DoneCh:
+		// closed — OK
+	case <-time.After(time.Second):
+		t.Fatal("DoneCh was not closed after dispatch error")
+	}
+
+	if job.Status != model.StatusFailed {
+		t.Fatalf("expected StatusFailed, got %q", job.Status)
+	}
+	if job.Error != "telegram rejected message" {
+		t.Fatalf("expected error message, got %q", job.Error)
+	}
+}
+
+func TestWorkerReplyRouting(t *testing.T) {
+	dispatched := make(chan *model.Job, 1)
+
+	dispatch := func(job *model.Job) error {
+		dispatched <- job
+		return nil
+	}
+
+	q := New(dispatch, func(*model.Job) {})
+	q.Start()
+
+	id := q.Submit("hello", time.Minute, false)
 
 	job := <-dispatched
 	job.ReplyCh <- "the answer"

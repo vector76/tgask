@@ -25,7 +25,7 @@ type mockBotAPI struct {
 	updatesCh           chan []telegram.Update
 }
 
-func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, error) {
+func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string, parseMode string) (int, error) {
 	m.mu.Lock()
 	m.nextMsgID++
 	id := m.nextMsgID
@@ -63,7 +63,7 @@ func buildStack(t *testing.T) (serverURL string, mock *mockBotAPI, cleanup func(
 
 	tg := telegram.New(mock, telegram.Config{ChatID: 12345})
 
-	dispatch := func(job *model.Job) { _ = tg.SendQuery(job) }
+	dispatch := func(job *model.Job) error { return tg.SendQuery(job) }
 	q := queue.New(dispatch, tg.HandleExpiry)
 
 	srv := server.New(server.Config{Token: "test-token", Version: "test"}, q, tg)

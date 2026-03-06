@@ -87,10 +87,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	tg := telegram.New(tgClient, telegram.Config{BotToken: cfg.botToken, ChatID: cfg.chatID})
 
 	// DispatchFunc wraps SendQuery (which returns error) into func(*model.Job)
-	dispatch := func(job *model.Job) {
-		if err := tg.SendQuery(job); err != nil {
-			log.Printf("serve: SendQuery error: %v", err)
-		}
+	dispatch := func(job *model.Job) error {
+		return tg.SendQuery(job)
 	}
 	q := queue.New(dispatch, tg.HandleExpiry)
 

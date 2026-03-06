@@ -28,6 +28,7 @@ func init() {
 	askCmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
 	askCmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	askCmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
+	askCmd.Flags().BoolP("plain-text", "t", false, "Send prompt as plain text (no Markdown formatting)")
 }
 
 func runAsk(cmd *cobra.Command, args []string) error {
@@ -103,7 +104,8 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 		}
 
 		// POST /api/v1/ask
-		body, _ := json.Marshal(map[string]interface{}{"prompt": prompt})
+		plainText, _ := cmd.Flags().GetBool("plain-text")
+		body, _ := json.Marshal(map[string]interface{}{"prompt": prompt, "plain_text": plainText})
 		req, _ := http.NewRequest("POST", tgaskURL+"/api/v1/ask", bytes.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
@@ -151,6 +153,7 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 		var result struct {
 			Status string `json:"status"`
 			Reply  string `json:"reply"`
+			Error  string `json:"error"`
 		}
 		json.NewDecoder(pollResp.Body).Decode(&result)
 		pollResp.Body.Close()
@@ -172,7 +175,11 @@ func doAsk(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writer)
 		case http.StatusAccepted:
 			continue
 		default:
-			fmt.Fprintf(os.Stderr, "error: server returned %d\n", pollResp.StatusCode)
+			if result.Error != "" {
+				fmt.Fprintf(os.Stderr, "error: %s\n", result.Error)
+			} else {
+				fmt.Fprintf(os.Stderr, "error: server returned %d\n", pollResp.StatusCode)
+			}
 			return 1, nil
 		}
 	}

@@ -24,7 +24,7 @@ type mockBotAPI struct {
 	updatesCh      chan []telegram.Update
 }
 
-func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, error) {
+func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string, parseMode string) (int, error) {
 	m.mu.Lock()
 	m.nextMsgID++
 	id := m.nextMsgID

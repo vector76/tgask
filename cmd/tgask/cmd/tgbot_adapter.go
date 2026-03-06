@@ -20,6 +20,7 @@ func newTgBotAdapter(token string) (*tgBotAdapter, error) {
 // SendMessage implements telegram.BotAPI
 func (a *tgBotAdapter) SendMessage(chatID int64, text string, replyMarkup interface{}) (int, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = tgbotapi.ModeMarkdown
 	if replyMarkup != nil {
 		msg.ReplyMarkup = replyMarkup
 	}
@@ -28,8 +29,9 @@ func (a *tgBotAdapter) SendMessage(chatID int64, text string, replyMarkup interf
 }
 
 // SendForceReplyMessage implements telegram.BotAPI
-func (a *tgBotAdapter) SendForceReplyMessage(chatID int64, text string) (int, error) {
+func (a *tgBotAdapter) SendForceReplyMessage(chatID int64, text string, parseMode string) (int, error) {
 	msg := tgbotapi.NewMessage(chatID, text)
+	msg.ParseMode = parseMode
 	msg.ReplyMarkup = tgbotapi.ForceReply{ForceReply: true, Selective: true}
 	sent, err := a.bot.Send(msg)
 	return sent.MessageID, err

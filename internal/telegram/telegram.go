@@ -97,7 +97,11 @@ func (t *Telegram) pollLoop() {
 func (t *Telegram) SendQuery(job *model.Job) error {
 	text := fmt.Sprintf("%s\n\nReply by %s", job.Prompt, job.ExpiresAt.Format("15:04"))
 
-	messageID, err := t.api.SendForceReplyMessage(t.cfg.ChatID, text)
+	parseMode := "Markdown"
+	if job.PlainText {
+		parseMode = ""
+	}
+	messageID, err := t.api.SendForceReplyMessage(t.cfg.ChatID, text, parseMode)
 	if err != nil {
 		return err
 	}

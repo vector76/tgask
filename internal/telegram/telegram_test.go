@@ -49,7 +49,7 @@ func (m *mockBotAPI) SendMessage(chatID int64, text string, replyMarkup interfac
 	return 0, nil
 }
 
-func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string) (int, error) {
+func (m *mockBotAPI) SendForceReplyMessage(chatID int64, text string, parseMode string) (int, error) {
 	return m.forceReplyMsgID, nil
 }
 
@@ -95,7 +95,7 @@ func TestOffsetAdvancement(t *testing.T) {
 func TestReplyRouting(t *testing.T) {
 	tg, mock := newTestTelegram()
 
-	job := model.NewJob("job1", "prompt", time.Minute)
+	job := model.NewJob("job1", "prompt", time.Minute, false)
 	const sentMsgID = 42
 	tg.inFlight[sentMsgID] = job
 
@@ -141,7 +141,7 @@ func TestReplyRouting(t *testing.T) {
 func TestNonReplyDiscarded(t *testing.T) {
 	tg, mock := newTestTelegram()
 
-	job := model.NewJob("job2", "prompt", time.Minute)
+	job := model.NewJob("job2", "prompt", time.Minute, false)
 	tg.inFlight[100] = job
 
 	mock.updatesCh <- []Update{
@@ -173,7 +173,7 @@ func TestSendQuery(t *testing.T) {
 	tg, mock := newTestTelegram()
 	mock.forceReplyMsgID = 42
 
-	job := model.NewJob("job1", "test prompt", time.Minute)
+	job := model.NewJob("job1", "test prompt", time.Minute, false)
 	if err := tg.SendQuery(job); err != nil {
 		t.Fatalf("SendQuery returned error: %v", err)
 	}
@@ -220,7 +220,7 @@ func TestHandleExpiry(t *testing.T) {
 	tg, mock := newTestTelegram()
 	tg.cfg.ChatID = 12345
 
-	job := model.NewJob("job1", "prompt", time.Minute)
+	job := model.NewJob("job1", "prompt", time.Minute, false)
 	const msgID = 55
 	job.TelegramMessageID = msgID
 	tg.inFlight[msgID] = job

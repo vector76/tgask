@@ -9,7 +9,7 @@ import (
 	"github.com/vector76/tgask/internal/model"
 )
 
-type DispatchFunc func(job *model.Job)
+type DispatchFunc func(job *model.Job) error
 type ExpiryFunc func(job *model.Job)
 
 type Queue struct {
@@ -29,14 +29,14 @@ func New(dispatch DispatchFunc, expiry ExpiryFunc) *Queue {
 	}
 }
 
-func (q *Queue) Submit(prompt string, timeout time.Duration) string {
+func (q *Queue) Submit(prompt string, timeout time.Duration, plainText bool) string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		panic(err)
 	}
 	id := base64.RawURLEncoding.EncodeToString(b)
 
-	job := model.NewJob(id, prompt, timeout)
+	job := model.NewJob(id, prompt, timeout, plainText)
 
 	q.mu.Lock()
 	q.jobs[id] = job
@@ -60,7 +60,14 @@ func (q *Queue) Start() {
 
 func (q *Queue) worker() {
 	for job := range q.pending {
-		q.dispatch(job)
+		if err := q.dispatch(job); err != nil {
+			q.mu.Lock()
+			job.Status = model.StatusFailed
+			job.Error = err.Error()
+			close(job.DoneCh)
+			q.mu.Unlock()
+			continue
+		}
 
 		select {
 		case reply := <-job.ReplyCh:

@@ -91,7 +91,7 @@ func doDirect(cmd *cobra.Command, args []string, stdin io.Reader, stdout io.Writ
 		}
 	}
 
-	job := model.NewJob(fmt.Sprintf("%d", time.Now().UnixNano()), prompt, time.Duration(timeoutSecs)*time.Second)
+	job := model.NewJob(fmt.Sprintf("%d", time.Now().UnixNano()), prompt, time.Duration(timeoutSecs)*time.Second, false)
 
 	tg := telegram.New(api, telegram.Config{BotToken: botToken, ChatID: chatID})
 	tg.Start()

@@ -17,8 +17,8 @@ type mockQueue struct {
 	job *model.Job
 }
 
-func (m *mockQueue) Submit(prompt string, timeout time.Duration) string {
-	m.job = model.NewJob("test-id", prompt, timeout)
+func (m *mockQueue) Submit(prompt string, timeout time.Duration, plainText bool) string {
+	m.job = model.NewJob("test-id", prompt, timeout, plainText)
 	return m.job.ID
 }
 
@@ -249,6 +249,36 @@ func TestResultExpiredJob(t *testing.T) {
 	}
 }
 
+// TestResultFailedJob: GET /api/v1/result/{id} for a failed job returns 500 with error.
+func TestResultFailedJob(t *testing.T) {
+	q := &mockQueue{}
+	q.job = &model.Job{
+		ID:     "fail-id",
+		Status: model.StatusFailed,
+		Error:  "telegram: bad request",
+		DoneCh: make(chan struct{}),
+	}
+	close(q.job.DoneCh)
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodGet, "/api/v1/result/fail-id", "")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", rr.Code)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(rr.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode body: %v", err)
+	}
+	if body["status"] != "failed" {
+		t.Errorf("expected status=failed, got %q", body["status"])
+	}
+	if body["error"] != "telegram: bad request" {
+		t.Errorf("expected error message, got %q", body["error"])
+	}
+}
+
 // TestResultLongPollTimeout: GET /api/v1/result/{id}?wait=1 for a queued job returns 202 after ~1s.
 func TestResultLongPollTimeout(t *testing.T) {
 	q := &mockQueue{}
@@ -317,6 +347,25 @@ func TestSendEmptyMessage(t *testing.T) {
 	}
 	if body["error"] != "message required" {
 		t.Errorf("expected error=message required, got %q", body["error"])
+	}
+}
+
+// TestAskPlainTextPropagated: plain_text=true in request sets PlainText on the job.
+func TestAskPlainTextPropagated(t *testing.T) {
+	q := &mockQueue{}
+	s := newTestServerWithQueue(q)
+	req := authedRequest(http.MethodPost, "/api/v1/ask", `{"prompt":"hello","plain_text":true}`)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d", rr.Code)
+	}
+	if q.job == nil {
+		t.Fatal("expected job to be submitted")
+	}
+	if !q.job.PlainText {
+		t.Error("expected job.PlainText=true")
 	}
 }
 

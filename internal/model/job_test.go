@@ -8,7 +8,7 @@ import (
 func TestNewJob(t *testing.T) {
 	timeout := 30 * time.Second
 	before := time.Now()
-	job := NewJob("test-id", "test prompt", timeout)
+	job := NewJob("test-id", "test prompt", timeout, false)
 	after := time.Now()
 
 	if job.ID != "test-id" {
@@ -46,6 +46,7 @@ func TestStatusConstants(t *testing.T) {
 		{StatusAwaitingReply, "awaiting_reply"},
 		{StatusDone, "done"},
 		{StatusExpired, "expired"},
+		{StatusFailed, "failed"},
 	}
 	for _, tt := range tests {
 		if string(tt.status) != tt.want {

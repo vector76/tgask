@@ -10,8 +10,9 @@ type BotAPI interface {
 
 	// SendForceReplyMessage sends a message with ForceReply markup enabled,
 	// prompting the recipient to reply directly to the message.
+	// parseMode is the Telegram parse mode (e.g. "Markdown") or "" for plain text.
 	// Returns the sent message's message_id.
-	SendForceReplyMessage(chatID int64, text string) (messageID int, err error)
+	SendForceReplyMessage(chatID int64, text string, parseMode string) (messageID int, err error)
 
 	// DeleteMessage deletes a previously sent message.
 	DeleteMessage(chatID int64, messageID int) error

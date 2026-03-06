@@ -20,6 +20,7 @@ func newAskCmd() *cobra.Command {
 	cmd.Flags().StringP("output", "o", "", "Write reply to file (stdout stays clean)")
 	cmd.Flags().String("token", "", "HTTP bearer token (overrides TGASK_TOKEN)")
 	cmd.Flags().StringP("resume", "r", "", "Resume polling a previously submitted job by ID")
+	cmd.Flags().BoolP("plain-text", "t", false, "Send prompt as plain text (no Markdown formatting)")
 	return cmd
 }
 
@@ -189,6 +190,51 @@ func TestAskOutputToStdout(t *testing.T) {
 	}
 }
 
+// TestAskPlainTextFlag: -t flag sends plain_text=true in POST body.
+func TestAskPlainTextFlag(t *testing.T) {
+	srv, getBody := mockAskServer(t, doneHandler("ok"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	cmd := newAskCmd()
+	cmd.Flags().Set("plain-text", "true")
+
+	var out bytes.Buffer
+	code, err := doAsk(cmd, []string{"hello"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	body := getBody()
+	if body["plain_text"] != true {
+		t.Errorf("expected plain_text=true in request body, got %v", body["plain_text"])
+	}
+}
+
+// TestAskPlainTextFlagDefault: without -t, plain_text is false in POST body.
+func TestAskPlainTextFlagDefault(t *testing.T) {
+	srv, getBody := mockAskServer(t, doneHandler("ok"))
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	var out bytes.Buffer
+	code, err := doAsk(newAskCmd(), []string{"hello"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 0 {
+		t.Fatalf("expected exit 0, got %d", code)
+	}
+	body := getBody()
+	if body["plain_text"] != false {
+		t.Errorf("expected plain_text=false in request body, got %v", body["plain_text"])
+	}
+}
+
 // TestAskExitCode2On410: 410 from poll → exit code 2.
 func TestAskExitCode2On410(t *testing.T) {
 	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
@@ -206,6 +252,26 @@ func TestAskExitCode2On410(t *testing.T) {
 	}
 	if code != 2 {
 		t.Fatalf("expected exit 2, got %d", code)
+	}
+}
+
+// TestAskExitCode1OnFailedJob: 500 with error body → exit code 1 and error message on stderr.
+func TestAskExitCode1OnFailedJob(t *testing.T) {
+	srv, _ := mockAskServer(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"status": "failed", "error": "telegram: bad request"})
+	})
+	defer srv.Close()
+	t.Setenv("TGASK_URL", srv.URL)
+	t.Setenv("TGASK_TOKEN", "tok")
+
+	var out bytes.Buffer
+	code, err := doAsk(newAskCmd(), []string{"q"}, strings.NewReader(""), &out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code != 1 {
+		t.Fatalf("expected exit 1, got %d", code)
 	}
 }
 

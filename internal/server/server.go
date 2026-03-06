@@ -13,7 +13,7 @@ import (
 
 // Queuer is satisfied by *queue.Queue
 type Queuer interface {
-	Submit(prompt string, timeout time.Duration) string
+	Submit(prompt string, timeout time.Duration, plainText bool) string
 	GetJob(id string) (*model.Job, bool)
 }
 
@@ -89,8 +89,9 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Prompt  string `json:"prompt"`
-		Timeout int    `json:"timeout"`
+		Prompt    string `json:"prompt"`
+		Timeout   int    `json:"timeout"`
+		PlainText bool   `json:"plain_text"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
@@ -104,7 +105,7 @@ func (s *Server) handleAsk(w http.ResponseWriter, r *http.Request) {
 	if req.Timeout > 0 {
 		jobTimeout = min(time.Duration(req.Timeout)*time.Second, s.cfg.DefaultJobTimeout)
 	}
-	id := s.queue.Submit(req.Prompt, jobTimeout)
+	id := s.queue.Submit(req.Prompt, jobTimeout, req.PlainText)
 	writeJSON(w, http.StatusCreated, map[string]string{"id": id})
 }
 
@@ -125,6 +126,10 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusGone, map[string]string{"status": string(model.StatusExpired)})
 		return
 	}
+	if job.Status == model.StatusFailed {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"status": string(model.StatusFailed), "error": job.Error})
+		return
+	}
 
 	// Long-poll: wait for DoneCh or timeout
 	waitSecs := 30
@@ -139,9 +144,12 @@ func (s *Server) handleResult(w http.ResponseWriter, r *http.Request) {
 
 	select {
 	case <-job.DoneCh:
-		if job.Status == model.StatusDone {
+		switch job.Status {
+		case model.StatusDone:
 			writeJSON(w, http.StatusOK, map[string]string{"status": string(model.StatusDone), "reply": job.Reply})
-		} else {
+		case model.StatusFailed:
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"status": string(model.StatusFailed), "error": job.Error})
+		default:
 			writeJSON(w, http.StatusGone, map[string]string{"status": string(model.StatusExpired)})
 		}
 	case <-time.After(time.Duration(waitSecs) * time.Second):
